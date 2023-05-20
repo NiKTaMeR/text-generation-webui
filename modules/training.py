@@ -14,9 +14,9 @@ from datasets import Dataset, load_dataset
 from peft import (LoraConfig, get_peft_model, prepare_model_for_int8_training,
                   set_peft_model_state_dict)
 
-from modules import shared, ui
+from modules import shared, ui, utils
 from modules.evaluate import calculate_perplexity, generate_markdown_table, save_past_evaluations
-from server import get_available_loras, get_available_models
+
 
 # This mapping is from a very recent commit, not yet released.
 # If not available, default to a backup map for some common model types.
@@ -36,13 +36,9 @@ except:
         "GPTNeoXForCausalLM": "gpt_neox"
     }
 
+
 WANT_INTERRUPT = False
-
-PARAMETERS = ["lora_name", "always_override", "save_steps", "micro_batch_size", "batch_size", "epochs", "learning_rate", "lr_scheduler_type", "lora_rank", "lora_alpha", "lora_dropout", "cutoff_len", "dataset", "eval_dataset", "format", "eval_steps", "raw_text_file", "overlap_len", "newline_favor_len", "higher_rank_limit", "warmup_steps", "optimizer"]
-
-
-def get_datasets(path: str, ext: str):
-    return ['None'] + sorted(set([k.stem for k in Path(path).glob(f'*.{ext}') if k.stem != 'put-trainer-datasets-here']), key=str.lower)
+PARAMETERS = ["lora_name", "always_override", "save_steps", "micro_batch_size", "batch_size", "epochs", "learning_rate", "lr_scheduler_type", "lora_rank", "lora_alpha", "lora_dropout", "cutoff_len", "dataset", "eval_dataset", "format", "eval_steps", "raw_text_file", "overlap_len", "newline_favor_len", "higher_rank_limit", "warmup_steps", "optimizer", "hard_cut_string"]
 
 
 def create_train_interface():
@@ -55,8 +51,8 @@ def create_train_interface():
             save_steps = gr.Number(label='Save every n steps', value=0, info='If above 0, a checkpoint of the LoRA will be saved every time this many steps pass.')
 
         with gr.Row():
-            copy_from = gr.Dropdown(label='Copy parameters from', value='None', choices=get_available_loras())
-            ui.create_refresh_button(copy_from, lambda: None, lambda: {'choices': get_available_loras()}, 'refresh-button')
+            copy_from = gr.Dropdown(label='Copy parameters from', value='None', choices=utils.get_available_loras())
+            ui.create_refresh_button(copy_from, lambda: None, lambda: {'choices': utils.get_available_loras()}, 'refresh-button')
 
         with gr.Row():
             # TODO: Implement multi-device support.
@@ -76,19 +72,20 @@ def create_train_interface():
 
         with gr.Tab(label='Formatted Dataset'):
             with gr.Row():
-                dataset = gr.Dropdown(choices=get_datasets('training/datasets', 'json'), value='None', label='Dataset', info='The dataset file to use for training.')
-                ui.create_refresh_button(dataset, lambda: None, lambda: {'choices': get_datasets('training/datasets', 'json')}, 'refresh-button')
-                eval_dataset = gr.Dropdown(choices=get_datasets('training/datasets', 'json'), value='None', label='Evaluation Dataset', info='The (optional) dataset file used to evaluate the model after training.')
-                ui.create_refresh_button(eval_dataset, lambda: None, lambda: {'choices': get_datasets('training/datasets', 'json')}, 'refresh-button')
-                format = gr.Dropdown(choices=get_datasets('training/formats', 'json'), value='None', label='Data Format', info='The format file used to decide how to format the dataset input.')
-                ui.create_refresh_button(format, lambda: None, lambda: {'choices': get_datasets('training/formats', 'json')}, 'refresh-button')
+                dataset = gr.Dropdown(choices=utils.get_datasets('training/datasets', 'json'), value='None', label='Dataset', info='The dataset file to use for training.')
+                ui.create_refresh_button(dataset, lambda: None, lambda: {'choices': utils.get_datasets('training/datasets', 'json')}, 'refresh-button')
+                eval_dataset = gr.Dropdown(choices=utils.get_datasets('training/datasets', 'json'), value='None', label='Evaluation Dataset', info='The (optional) dataset file used to evaluate the model after training.')
+                ui.create_refresh_button(eval_dataset, lambda: None, lambda: {'choices': utils.get_datasets('training/datasets', 'json')}, 'refresh-button')
+                format = gr.Dropdown(choices=utils.get_datasets('training/formats', 'json'), value='None', label='Data Format', info='The format file used to decide how to format the dataset input.')
+                ui.create_refresh_button(format, lambda: None, lambda: {'choices': utils.get_datasets('training/formats', 'json')}, 'refresh-button')
 
             eval_steps = gr.Number(label='Evaluate every n steps', value=100, info='If an evaluation dataset is given, test it every time this many steps pass.')
 
         with gr.Tab(label="Raw text file"):
             with gr.Row():
-                raw_text_file = gr.Dropdown(choices=get_datasets('training/datasets', 'txt'), value='None', label='Text file', info='The raw text file to use for training.')
-                ui.create_refresh_button(raw_text_file, lambda: None, lambda: {'choices': get_datasets('training/datasets', 'txt')}, 'refresh-button')
+                raw_text_file = gr.Dropdown(choices=utils.get_datasets('training/datasets', 'txt'), value='None', label='Text file', info='The raw text file to use for training.')
+                ui.create_refresh_button(raw_text_file, lambda: None, lambda: {'choices': utils.get_datasets('training/datasets', 'txt')}, 'refresh-button')
+                hard_cut_string = gr.Textbox(label='Hard Cut String', value='\\n\\n\\n', info='String that indicates a hard cut between text parts. Helps prevent unwanted overlap.')
 
             with gr.Row():
                 overlap_len = gr.Slider(label='Overlap Length', minimum=0, maximum=512, value=128, step=16, info='Overlap length - ie how many tokens from the prior chunk of text to include into the next chunk. (The chunks themselves will be of a size determined by Cutoff Length below). Setting overlap to exactly half the cutoff length may be ideal.')
@@ -111,8 +108,8 @@ def create_train_interface():
     with gr.Tab('Perplexity evaluation', elem_id='evaluate-tab'):
         with gr.Row():
             with gr.Column():
-                models = gr.Dropdown(get_available_models(), label='Models', multiselect=True)
-                evaluate_text_file = gr.Dropdown(choices=['wikitext', 'ptb', 'ptb_new'] + get_datasets('training/datasets', 'txt')[1:], value='wikitext', label='Input dataset', info='The raw text file on which the model will be evaluated. The first options are automatically downloaded: wikitext, ptb, and ptb_new. The next options are your local text files under training/datasets.')
+                models = gr.Dropdown(utils.get_available_models(), label='Models', multiselect=True)
+                evaluate_text_file = gr.Dropdown(choices=['wikitext', 'ptb', 'ptb_new'] + utils.get_datasets('training/datasets', 'txt')[1:], value='wikitext', label='Input dataset', info='The raw text file on which the model will be evaluated. The first options are automatically downloaded: wikitext, ptb, and ptb_new. The next options are your local text files under training/datasets.')
                 with gr.Row():
                     stride_length = gr.Slider(label='Stride', minimum=1, maximum=2048, value=512, step=1, info='Used to make the evaluation faster at the cost of accuracy. 1 = slowest but most accurate. 512 is a common value.')
                     max_length = gr.Slider(label='max_length', minimum=0, maximum=8096, value=0, step=1, info='The context for each evaluation. If set to 0, the maximum context length for the model will be used.')
@@ -129,7 +126,7 @@ def create_train_interface():
         save_comments = gr.Button('Save comments')
 
     # Training events
-    all_params = [lora_name, always_override, save_steps, micro_batch_size, batch_size, epochs, learning_rate, lr_scheduler_type, lora_rank, lora_alpha, lora_dropout, cutoff_len, dataset, eval_dataset, format, eval_steps, raw_text_file, overlap_len, newline_favor_len, higher_rank_limit, warmup_steps, optimizer]
+    all_params = [lora_name, always_override, save_steps, micro_batch_size, batch_size, epochs, learning_rate, lr_scheduler_type, lora_rank, lora_alpha, lora_dropout, cutoff_len, dataset, eval_dataset, format, eval_steps, raw_text_file, overlap_len, newline_favor_len, higher_rank_limit, warmup_steps, optimizer, hard_cut_string]
     copy_from.change(do_copy_params, [copy_from] + all_params, all_params)
     start_button.click(do_train, all_params, output)
     stop_button.click(do_interrupt, None, None, queue=False)
@@ -182,7 +179,7 @@ def change_rank_limit(use_higher_ranks: bool):
 
 
 def clean_path(base_path: str, path: str):
-    """"Strips unusual symbols and forcibly builds a path as relative to the intended directory."""
+    """Strips unusual symbols and forcibly builds a path as relative to the intended directory."""
     # TODO: Probably could do with a security audit to guarantee there's no ways this can be bypassed to target an unwanted path.
     # Or swap it to a strict whitelist of [a-zA-Z_0-9]
     path = path.replace('\\', '/').replace('..', '_')
@@ -192,7 +189,7 @@ def clean_path(base_path: str, path: str):
     return f'{Path(base_path).absolute()}/{path}'
 
 
-def do_train(lora_name: str, always_override: bool, save_steps: int, micro_batch_size: int, batch_size: int, epochs: int, learning_rate: str, lr_scheduler_type: str, lora_rank: int, lora_alpha: int, lora_dropout: float, cutoff_len: int, dataset: str, eval_dataset: str, format: str, eval_steps: int, raw_text_file: str, overlap_len: int, newline_favor_len: int, higher_rank_limit: bool, warmup_steps: int, optimizer: str):
+def do_train(lora_name: str, always_override: bool, save_steps: int, micro_batch_size: int, batch_size: int, epochs: int, learning_rate: str, lr_scheduler_type: str, lora_rank: int, lora_alpha: int, lora_dropout: float, cutoff_len: int, dataset: str, eval_dataset: str, format: str, eval_steps: int, raw_text_file: str, overlap_len: int, newline_favor_len: int, higher_rank_limit: bool, warmup_steps: int, optimizer: str, hard_cut_string: str):
 
     if shared.args.monkey_patch:
         from monkeypatch.peft_tuners_lora_monkey_patch import \
@@ -258,16 +255,30 @@ def do_train(lora_name: str, always_override: bool, save_steps: int, micro_batch
     if raw_text_file not in ['None', '']:
         logging.info("Loading raw text file dataset...")
         with open(clean_path('training/datasets', f'{raw_text_file}.txt'), 'r', encoding='utf-8') as file:
-            raw_text = file.read()
+            raw_text = file.read().replace('\r', '')
 
-        tokens = shared.tokenizer.encode(raw_text)
+        cut_string = hard_cut_string.replace('\\n', '\n')
+        out_tokens = []
+        for text_part in raw_text.split(cut_string):
+            if text_part.strip() == '':
+                continue
+
+            tokens = shared.tokenizer.encode(text_part)
+            step = cutoff_len - overlap_len
+            if step <= 0:
+                yield f"Error: overlap_len ({overlap_len}) cannot be greater than or equal to cutoff_len ({cutoff_len})"
+                return
+
+            tokens = list(split_chunks(tokens, step))
+            for i in range(1, len(tokens)):
+                tokens[i] = tokens[i - 1][-overlap_len:] + tokens[i]
+
+            out_tokens.extend(tokens)
+            del tokens
+
         del raw_text  # Note: could be a gig for a large dataset, so delete redundant data as we go to be safe on RAM
-        tokens = list(split_chunks(tokens, cutoff_len - overlap_len))
-        for i in range(1, len(tokens)):
-            tokens[i] = tokens[i - 1][-overlap_len:] + tokens[i]
-
-        text_chunks = [shared.tokenizer.decode(x) for x in tokens]
-        del tokens
+        text_chunks = [shared.tokenizer.decode(x) for x in out_tokens]
+        del out_tokens
         if newline_favor_len > 0:
             text_chunks = [cut_chunk_for_newline(x, newline_favor_len) for x in text_chunks]
 
@@ -384,10 +395,10 @@ def do_train(lora_name: str, always_override: bool, save_steps: int, micro_batch
             logging_steps=5,
             evaluation_strategy="steps" if eval_data is not None else "no",
             eval_steps=math.ceil(eval_steps / gradient_accumulation_steps) if eval_data is not None else None,
-            save_strategy="no",
+            save_strategy="steps" if eval_data is not None else "no",
             output_dir=lora_file_path,
             lr_scheduler_type=lr_scheduler_type,
-            load_best_model_at_end=True if eval_data is not None else False,
+            load_best_model_at_end=eval_data is not None,
             # TODO: Enable multi-device support
             ddp_find_unused_parameters=None,
             no_cuda=shared.args.cpu
