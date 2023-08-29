@@ -1,7 +1,5 @@
 import inspect
-import logging
 import re
-import sys
 from pathlib import Path
 
 import accelerate
@@ -10,27 +8,11 @@ import transformers
 from transformers import AutoConfig, AutoModelForCausalLM
 
 import modules.shared as shared
+from modules.logging_colors import logger
 
-sys.path.insert(0, str(Path("repositories/GPTQ-for-LLaMa")))
-
-try:
-    import llama_inference_offload
-except ImportError:
-    logging.error('Failed to load GPTQ-for-LLaMa')
-    logging.error('See https://github.com/oobabooga/text-generation-webui/blob/main/docs/GPTQ-models-(4-bit-mode).md')
-    sys.exit(-1)
-
-try:
-    from modelutils import find_layers
-except ImportError:
-    from utils import find_layers
-
-try:
-    from quant import make_quant
-    is_triton = False
-except ImportError:
-    import quant
-    is_triton = True
+from gptq_for_llama import llama_inference_offload
+from gptq_for_llama.modelutils import find_layers
+from gptq_for_llama.quant import make_quant
 
 
 # This function is a replacement for the load_quant function in the
@@ -59,24 +41,21 @@ def _load_quant(model, checkpoint, wbits, groupsize=-1, faster_kernel=False, exc
         if name in layers:
             del layers[name]
 
-    if not is_triton:
-        gptq_args = inspect.getfullargspec(make_quant).args
+    gptq_args = inspect.getfullargspec(make_quant).args
 
-        make_quant_kwargs = {
-            'module': model,
-            'names': layers,
-            'bits': wbits,
-        }
-        if 'groupsize' in gptq_args:
-            make_quant_kwargs['groupsize'] = groupsize
-        if 'faster' in gptq_args:
-            make_quant_kwargs['faster'] = faster_kernel
-        if 'kernel_switch_threshold' in gptq_args:
-            make_quant_kwargs['kernel_switch_threshold'] = kernel_switch_threshold
+    make_quant_kwargs = {
+        'module': model,
+        'names': layers,
+        'bits': wbits,
+    }
+    if 'groupsize' in gptq_args:
+        make_quant_kwargs['groupsize'] = groupsize
+    if 'faster' in gptq_args:
+        make_quant_kwargs['faster'] = faster_kernel
+    if 'kernel_switch_threshold' in gptq_args:
+        make_quant_kwargs['kernel_switch_threshold'] = kernel_switch_threshold
 
-        make_quant(**make_quant_kwargs)
-    else:
-        quant.make_quant_linear(model, layers, wbits, groupsize)
+    make_quant(**make_quant_kwargs)
 
     del layers
     if checkpoint.endswith('.safetensors'):
@@ -84,18 +63,6 @@ def _load_quant(model, checkpoint, wbits, groupsize=-1, faster_kernel=False, exc
         model.load_state_dict(safe_load(checkpoint), strict=False)
     else:
         model.load_state_dict(torch.load(checkpoint), strict=False)
-
-    if is_triton:
-        if shared.args.quant_attn:
-            quant.make_quant_attn(model)
-
-        if eval and shared.args.fused_mlp:
-            quant.make_fused_mlp(model)
-
-        if shared.args.warmup_autotune:
-            quant.autotune_warmup_linear(model, transpose=not eval)
-            if eval and shared.args.fused_mlp:
-                quant.autotune_warmup_fused(model)
 
     model.seqlen = 2048
     return model
@@ -127,7 +94,7 @@ def find_quantized_model_file(model_name):
             found = list(path_to_model.glob(f"*{ext}"))
             if len(found) > 0:
                 if len(found) > 1:
-                    logging.warning(f'More than one {ext} model has been found. The last one will be selected. It could be wrong.')
+                    logger.warning(f'More than one {ext} model has been found. The last one will be selected. It could be wrong.')
 
                 pt_path = found[-1]
                 break
@@ -138,8 +105,8 @@ def find_quantized_model_file(model_name):
 # The function that loads the model in modules/models.py
 def load_quantized(model_name):
     if shared.args.model_type is None:
-        logging.error("The model could not be loaded because its type could not be inferred from its name.")
-        logging.error("Please specify the type manually using the --model_type argument.")
+        logger.error("The model could not be loaded because its type could not be inferred from its name.")
+        logger.error("Please specify the type manually using the --model_type argument.")
         return None
 
     # Select the appropriate load_quant function
@@ -148,21 +115,21 @@ def load_quantized(model_name):
         load_quant = llama_inference_offload.load_quant
     elif model_type in ('llama', 'opt', 'gptj'):
         if shared.args.pre_layer:
-            logging.warning("Ignoring --pre_layer because it only works for llama model type.")
+            logger.warning("Ignoring --pre_layer because it only works for llama model type.")
 
         load_quant = _load_quant
     else:
-        logging.error("Unknown pre-quantized model type specified. Only 'llama', 'opt' and 'gptj' are supported")
+        logger.error("Unknown pre-quantized model type specified. Only 'llama', 'opt' and 'gptj' are supported")
         exit()
 
     # Find the quantized model weights file (.pt/.safetensors)
     path_to_model = Path(f'{shared.args.model_dir}/{model_name}')
     pt_path = find_quantized_model_file(model_name)
     if not pt_path:
-        logging.error("Could not find the quantized model in .pt or .safetensors format, exiting...")
+        logger.error("Could not find the quantized model in .pt or .safetensors format, exiting...")
         exit()
     else:
-        logging.info(f"Found the following quantized model: {pt_path}")
+        logger.info(f"Found the following quantized model: {pt_path}")
 
     # qwopqwop200's offload
     if model_type == 'llama' and shared.args.pre_layer:
@@ -190,7 +157,7 @@ def load_quantized(model_name):
                 max_memory = accelerate.utils.get_balanced_memory(model)
 
             device_map = accelerate.infer_auto_device_map(model, max_memory=max_memory, no_split_module_classes=["LlamaDecoderLayer"])
-            logging.info("Using the following device map for the quantized model:", device_map)
+            logger.info("Using the following device map for the quantized model:", device_map)
             # https://huggingface.co/docs/accelerate/package_reference/big_modeling#accelerate.dispatch_model
             model = accelerate.dispatch_model(model, device_map=device_map, offload_buffers=True)
 

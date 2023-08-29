@@ -3,7 +3,7 @@
     margin-left: auto;
     margin-right: auto;
     background-color: rgb(31, 41, 55);
-    padding:3em;
+    padding: 3em;
     word-break: break-word;
     overflow-wrap: anywhere;
     color: #efefef !important;
@@ -26,4 +26,8 @@
 
 .container :not(pre) > code {
     white-space: normal !important;
+}
+
+.container .hoverable {
+    font-size: 14px;
 }
